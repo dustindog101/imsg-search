@@ -116,7 +116,7 @@ def dt_to_apple_ns(dt_str: str, end_of_day=False) -> int:
 
 def fmt_ts(apple_ns: int, full=False) -> str:
     dt = datetime.fromtimestamp(apple_to_unix(apple_ns))
-    return dt.strftime("%Y-%m-%d %H:%M") if not full else dt.strftime("%A, %B %-d %Y at %-I:%M %p")
+    return dt.strftime("%Y-%m-%d %-I:%M %p") if not full else dt.strftime("%A, %B %-d %Y at %-I:%M %p")
 
 
 def redact(handle: str) -> str:
