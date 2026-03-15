@@ -14,7 +14,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 from rich import box
-from rich.console import Console
+from rich.align import Align
+from rich.console import Console, Group as RichGroup
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.rule import Rule
@@ -230,7 +231,7 @@ def get_group_members(conn, chat_id: int) -> list[str]:
 # List groups
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_list_groups(conn, limit: int, do_redact: bool):
+def run_list_groups(conn, limit: int, do_redact: bool, as_json: bool = False):
     rows = conn.execute("""
         SELECT c.ROWID as chat_id, c.display_name, c.chat_identifier,
                COUNT(DISTINCT chj.handle_id) as member_count,
@@ -247,7 +248,28 @@ def run_list_groups(conn, limit: int, do_redact: bool):
     """, (limit,)).fetchall()
 
     if not rows:
-        console.print("\n  [warning]⚠  No group chats found.[/warning]\n")
+        if as_json:
+            print(json.dumps([]))
+        else:
+            console.print("\n  [warning]⚠  No group chats found.[/warning]\n")
+        return
+
+    if as_json:
+        out = []
+        for r in rows:
+            name = r["display_name"] or ""
+            cid  = r["chat_identifier"]
+            if do_redact:
+                name = name[:3] + "***" if len(name) > 3 else "***"
+                cid  = cid[:12] + "..."
+            out.append({
+                "name":          name or "(unnamed)",
+                "chat_id":       cid,
+                "member_count":  r["member_count"],
+                "msg_count":     r["msg_count"],
+                "last_active":   fmt_ts(r["last_active"]),
+            })
+        print(json.dumps(out, indent=2))
         return
 
     console.print()
@@ -297,9 +319,10 @@ LOGO = """\
 
 def print_banner():
     console.print()
-    console.print(Text(LOGO, style="bold cyan", justify="center"))
-    console.print(Text("  search your iMessages from the terminal", style="dim cyan"))
-    console.print(Text(f"  v{VERSION}  ·  read-only · safe · composable", style="dim white"))
+    for line in LOGO.splitlines():
+        console.print(Text(line, style="bold cyan", no_wrap=True))
+    console.print(Text("\n  search your iMessages from the terminal", style="dim cyan", no_wrap=True))
+    console.print(Text(f"  v{VERSION}  ·  read-only · safe · composable\n", style="dim white", no_wrap=True))
     console.print()
 
 
@@ -500,7 +523,7 @@ def fetch_context(conn, chat_id, msg_id, n):
 # ────────────────────────────────────────────────────────────────────────────
 
 def fetch_reactions(conn, handle=None, group_chat_id=None):
-    """Fetch reaction counts split by is_from_me."""
+    """Fetch reaction counts split by is_from_me, used for both display and JSON."""
     if handle:
         h = normalize_handle(handle)
         return conn.execute("""
@@ -525,6 +548,33 @@ def fetch_reactions(conn, handle=None, group_chat_id=None):
             GROUP BY m.associated_message_type, m.is_from_me, h.id
         """, (group_chat_id,)).fetchall()
     return []
+
+
+def reactions_to_json(reaction_rows, is_group=False, do_redact=False) -> dict:
+    """Convert reaction rows to a JSON-serializable dict."""
+    if is_group:
+        members: dict[str, dict] = {}
+        for r in reaction_rows:
+            if r["is_from_me"]:
+                key = "you"
+            else:
+                key = r["sender_handle"] or "unknown"
+                if do_redact:
+                    key = redact(key)
+            rname = REACTION_MAP.get(r["rtype"], ("", str(r["rtype"])))[1]
+            members.setdefault(key, {})
+            members[key][rname] = members[key].get(rname, 0) + r["cnt"]
+        return {"by_member": members}
+    else:
+        mine: dict[str, int] = {}
+        theirs: dict[str, int] = {}
+        for r in reaction_rows:
+            rname = REACTION_MAP.get(r["rtype"], ("", str(r["rtype"])))[1]
+            if r["is_from_me"]:
+                mine[rname] = mine.get(rname, 0) + r["cnt"]
+            else:
+                theirs[rname] = theirs.get(rname, 0) + r["cnt"]
+        return {"their_reactions_to_you": theirs, "your_reactions_to_them": mine}
 
 
 def print_reactions_dm(reaction_rows, do_redact):
@@ -591,35 +641,71 @@ def print_reactions_group(reaction_rows, members, do_redact):
     console.print()
 
 
-def run_stats_self(conn, do_redact: bool, deep: bool = False):
+def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = False):
     """Personal dashboard — shown when --stats used with no --contact or --group."""
-    console.print()
-    console.print(Panel(
-        "[group.icon]📱[/group.icon]  [chat.header]Your iMessage Overview[/chat.header]",
-        border_style="magenta", expand=False, padding=(0, 2),
-    ))
-    console.print()
 
-    total = conn.execute(f"SELECT COUNT(*) FROM message m WHERE {REAL_MSG_FILTER}").fetchone()[0]
-    dms   = conn.execute("SELECT COUNT(*) FROM chat WHERE style = 45").fetchone()[0]
-    groups= conn.execute("SELECT COUNT(*) FROM chat WHERE style = 43").fetchone()[0]
-    row   = conn.execute(f"SELECT MIN(m.date), MAX(m.date) FROM message m WHERE {REAL_MSG_FILTER}").fetchone()
-    since = fmt_ts(row[0]) if row[0] else "unknown"
+    total  = conn.execute(f"SELECT COUNT(*) FROM message m WHERE {REAL_MSG_FILTER}").fetchone()[0]
+    dms    = conn.execute("SELECT COUNT(*) FROM chat WHERE style = 45").fetchone()[0]
+    groups = conn.execute("SELECT COUNT(*) FROM chat WHERE style = 43").fetchone()[0]
+    row    = conn.execute(f"SELECT MIN(m.date), MAX(m.date) FROM message m WHERE {REAL_MSG_FILTER}").fetchone()
+    since  = fmt_ts(row[0]) if row[0] else "unknown"
 
-    ov = Table(box=box.SIMPLE, show_header=False, padding=(0, 3))
-    ov.add_column(style="stat.key"); ov.add_column(style="stat.val")
-    ov.add_column(style="stat.key"); ov.add_column(style="stat.val")
-    ov.add_row("Total messages", f"{total:,}",  "DM conversations",  f"{dms:,}")
-    ov.add_row("Group chats",    f"{groups:,}", "Messaging since",   since)
-    console.print(Padding(ov, (0, 2)))
-
-    # Top contacts
-    top_contacts = conn.execute(f"""
+    top_contacts_rows = conn.execute(f"""
         SELECT h.id, COUNT(*) as cnt FROM message m
         LEFT JOIN handle h ON m.handle_id = h.ROWID
         WHERE {REAL_MSG_FILTER} AND h.id IS NOT NULL AND m.is_from_me = 0
         GROUP BY h.id ORDER BY cnt DESC LIMIT 6
     """).fetchall()
+
+    top_groups_rows = conn.execute(f"""
+        SELECT c.display_name, c.chat_identifier,
+               COUNT(DISTINCT chj.handle_id) as members,
+               COUNT(DISTINCT cmj.message_id) as cnt
+        FROM chat c
+        JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+        JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+        JOIN message m ON cmj.message_id = m.ROWID
+        WHERE c.style = 43 AND {REAL_MSG_FILTER}
+        GROUP BY c.ROWID ORDER BY cnt DESC LIMIT 5
+    """).fetchall()
+
+    year_rows = conn.execute(f"""
+        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as mo, COUNT(*) as cnt
+        FROM message m WHERE {REAL_MSG_FILTER} GROUP BY mo ORDER BY mo
+    """).fetchall()
+
+    if as_json:
+        out: dict = {
+            "total_messages": total,
+            "dm_conversations": dms,
+            "group_chats": groups,
+            "messaging_since": since,
+            "top_contacts": [
+                {"handle": redact(r["id"]) if do_redact else r["id"], "messages": r["cnt"]}
+                for r in top_contacts_rows
+            ],
+            "top_groups": [
+                {
+                    "name":    r["display_name"] or r["chat_identifier"],
+                    "members": r["members"],
+                    "messages": r["cnt"],
+                }
+                for r in top_groups_rows
+            ],
+            "monthly_volume": [
+                {"month": r["mo"], "messages": r["cnt"]} for r in year_rows
+            ],
+        }
+        if deep:
+            all_rows = conn.execute(f"SELECT text FROM message m WHERE {REAL_MSG_FILTER} AND m.is_from_me = 1").fetchall()
+            out["your_top_words"] = [{"word": w, "count": c} for w, c in top_words(all_rows, n=12)]
+            hour_rows = conn.execute(f"""
+                SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as hr, COUNT(*) as cnt
+                FROM message m WHERE {REAL_MSG_FILTER} GROUP BY hr
+            """).fetchall()
+            out["hourly_activity"] = [{"hour": int(r["hr"]), "messages": r["cnt"]} for r in hour_rows]
+        print(json.dumps(out, indent=2))
+        return
     if top_contacts:
         console.print(Rule("[section]Top Contacts[/section]"))
         console.print()
@@ -708,7 +794,7 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False):
     console.print()
 
 
-def run_stats_dm(conn, handle: str, do_redact: bool, deep: bool = False):
+def run_stats_dm(conn, handle: str, do_redact: bool, deep: bool = False, as_json: bool = False):
     h = normalize_handle(handle)
     label = redact(h) if do_redact else h
 
@@ -722,7 +808,50 @@ def run_stats_dm(conn, handle: str, do_redact: bool, deep: bool = False):
     """, (h, h)).fetchall()
 
     if not rows:
-        console.print(f"\n  [warning]⚠  No messages found for {label}[/warning]\n")
+        if as_json:
+            print(json.dumps({"error": f"No messages found for {label}"}))
+        else:
+            console.print(f"\n  [warning]⚠  No messages found for {label}[/warning]\n")
+        return
+
+    sent = [r for r in rows if r["is_from_me"]]
+    recv = [r for r in rows if not r["is_from_me"]]
+    total = len(rows)
+    first_ts, last_ts = rows[0]["date"], rows[-1]["date"]
+
+    reaction_rows = fetch_reactions(conn, handle=handle)
+
+    if as_json:
+        out: dict = {
+            "contact":        label,
+            "total_messages": total,
+            "sent":           len(sent),
+            "received":       len(recv),
+            "first_message":  fmt_ts(first_ts),
+            "last_message":   fmt_ts(last_ts),
+            "relationship_days": int((apple_to_unix(last_ts) - apple_to_unix(first_ts)) / 86400),
+            "top_words_sent":     [{"word": w, "count": c} for w, c in top_words(sent)],
+            "top_words_received": [{"word": w, "count": c} for w, c in top_words(recv)],
+            "reactions":          reactions_to_json(reaction_rows, do_redact=do_redact),
+        }
+        if deep:
+            dow_sent = Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).weekday() for r in sent)
+            dow_recv = Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).weekday() for r in recv)
+            hour_all = Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).hour for r in rows)
+            out["activity_by_day"] = [
+                {"day": DAYS[i], "sent": dow_sent.get(i, 0), "received": dow_recv.get(i, 0)}
+                for i in range(7)
+            ]
+            out["activity_by_hour"] = [
+                {"hour": h, "messages": hour_all.get(h, 0)} for h in range(24)
+            ]
+            month_counts: dict[str, int] = defaultdict(int)
+            for r in rows:
+                month_counts[datetime.fromtimestamp(apple_to_unix(r["date"])).strftime("%Y-%m")] += 1
+            out["monthly_volume"] = [
+                {"month": mo, "messages": cnt} for mo, cnt in sorted(month_counts.items())
+            ]
+        print(json.dumps(out, indent=2))
         return
 
     sent = [r for r in rows if r["is_from_me"]]
@@ -810,7 +939,7 @@ def run_stats_dm(conn, handle: str, do_redact: bool, deep: bool = False):
 # Stats — Group
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_stats_group(conn, chat_id: int, group_name: str, do_redact: bool, deep: bool = False):
+def run_stats_group(conn, chat_id: int, group_name: str, do_redact: bool, deep: bool = False, as_json: bool = False):
     members = get_group_members(conn, chat_id)
 
     rows = conn.execute(f"""
@@ -823,7 +952,57 @@ def run_stats_group(conn, chat_id: int, group_name: str, do_redact: bool, deep: 
     """, (chat_id,)).fetchall()
 
     if not rows:
-        console.print(f"\n  [warning]⚠  No messages found in {group_name}[/warning]\n")
+        if as_json:
+            print(json.dumps({"error": f"No messages found in {group_name}"}))
+        else:
+            console.print(f"\n  [warning]⚠  No messages found in {group_name}[/warning]\n")
+        return
+
+    total = len(rows)
+    first_ts, last_ts = rows[0]["date"], rows[-1]["date"]
+
+    member_counts: Counter = Counter()
+    for r in rows:
+        if r["is_from_me"]:
+            member_counts["you"] += 1
+        else:
+            handle = r["sender_handle"] or "unknown"
+            member_counts[redact(handle) if do_redact else handle] += 1
+
+    reaction_rows = fetch_reactions(conn, group_chat_id=chat_id)
+
+    if as_json:
+        days_active = (apple_to_unix(last_ts) - apple_to_unix(first_ts)) / 86400
+        out: dict = {
+            "group":          group_name,
+            "members":        [redact(m) if do_redact else m for m in members],
+            "total_messages": total,
+            "first_message":  fmt_ts(first_ts),
+            "last_message":   fmt_ts(last_ts),
+            "days_active":    int(days_active),
+            "avg_msgs_per_day": round(total / max(days_active, 1), 1),
+            "message_distribution": [
+                {"member": m, "messages": c, "pct": round(c/total*100, 1)}
+                for m, c in member_counts.most_common()
+            ],
+            "top_words": [{"word": w, "count": c} for w, c in top_words(rows, n=10)],
+            "reactions": reactions_to_json(reaction_rows, is_group=True, do_redact=do_redact),
+        }
+        if deep:
+            member_msgs: dict[str, list] = defaultdict(list)
+            for r in rows:
+                key = "you" if r["is_from_me"] else (redact(r["sender_handle"] or "?") if do_redact else (r["sender_handle"] or "unknown"))
+                member_msgs[key].append(r)
+            out["per_member_top_words"] = {
+                m: [{"word": w, "count": c} for w, c in top_words(msgs, n=6)]
+                for m, msgs in member_msgs.items()
+            }
+            out["per_member_peak_hour"] = {}
+            for member, msgs in member_msgs.items():
+                h_ctr = Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).hour for r in msgs)
+                if h_ctr:
+                    out["per_member_peak_hour"][member] = max(h_ctr, key=h_ctr.get)
+        print(json.dumps(out, indent=2))
         return
 
     total = len(rows)
@@ -1143,7 +1322,7 @@ def main():
 
     # ── List groups ──
     if args.list_groups:
-        run_list_groups(conn, args.limit, args.redact)
+        run_list_groups(conn, args.limit, args.redact, as_json=args.as_json)
         conn.close()
         return
 
@@ -1157,10 +1336,16 @@ def main():
     if args.reactions:
         if group_chat_id:
             rr = fetch_reactions(conn, group_chat_id=group_chat_id)
-            print_reactions_group(rr, get_group_members(conn, group_chat_id), args.redact)
+            if args.as_json:
+                print(json.dumps(reactions_to_json(rr, is_group=True, do_redact=args.redact), indent=2))
+            else:
+                print_reactions_group(rr, get_group_members(conn, group_chat_id), args.redact)
         elif args.contact:
             rr = fetch_reactions(conn, handle=args.contact)
-            print_reactions_dm(rr, args.redact)
+            if args.as_json:
+                print(json.dumps(reactions_to_json(rr, do_redact=args.redact), indent=2))
+            else:
+                print_reactions_dm(rr, args.redact)
         else:
             err("--reactions requires --contact HANDLE or --group NAME")
         conn.close()
@@ -1169,12 +1354,11 @@ def main():
     # ── Stats mode ──
     if args.stats:
         if group_chat_id:
-            run_stats_group(conn, group_chat_id, group_name, args.redact, deep=args.deep)
+            run_stats_group(conn, group_chat_id, group_name, args.redact, deep=args.deep, as_json=args.as_json)
         elif args.contact:
-            run_stats_dm(conn, args.contact, args.redact, deep=args.deep)
+            run_stats_dm(conn, args.contact, args.redact, deep=args.deep, as_json=args.as_json)
         else:
-            # No contact or group → personal dashboard
-            run_stats_self(conn, args.redact, deep=args.deep)
+            run_stats_self(conn, args.redact, deep=args.deep, as_json=args.as_json)
         conn.close()
         return
 
