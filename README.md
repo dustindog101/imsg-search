@@ -69,7 +69,7 @@ $ imsg-search --text "fleet street" --context 2
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/yourusername/imsg-search.git
+git clone https://github.com/dustindog101/imsg-search.git
 cd imsg-search
 
 # 2. Install the one dependency
@@ -92,22 +92,23 @@ All filters are optional and fully composable.
 
 ### Options
 
-| Flag          | Shorthand | Argument | Description                            |
-| ------------- | --------- | -------- | -------------------------------------- |
-| `--text`      | `-t`      | `QUERY`  | Search message text (case-insensitive) |
-| `--contact`   | `-c`      | `HANDLE` | Filter by phone number or Apple ID     |
-| `--between`   | `-b`      | `A B`    | Chats where BOTH handles appear        |
-| `--from`      |           | `DATE`   | Start date, inclusive (YYYY-MM-DD)     |
-| `--to`        |           | `DATE`   | End date, inclusive (YYYY-MM-DD)       |
-| `--context`   | `-x`      | `N`      | Show N messages around each match      |
-| `--limit`     | `-l`      | `N`      | Max results (default: 50)              |
-| `--stats`     | `-s`      |          | Deep analytics for `--contact`         |
-| `--json`      | `-j`      |          | Machine-readable JSON output           |
-| `--redact`    | `-r`      |          | Mask phone numbers in output           |
-| `--db`        |           | `PATH`   | Custom path to chat.db                 |
-| `--no-banner` |           |          | Suppress startup banner                |
-| `--version`   | `-V`      |          | Print version                          |
-| `--help`      | `-h`      |          | Show help page                         |
+| Flag          | Shorthand | Argument    | Description                                       |
+| ------------- | --------- | ----------- | ------------------------------------------------- |
+| `--text`      | `-t`      | `QUERY`     | Search message text (case-insensitive)            |
+| `--contact`   | `-c`      | `HANDLE`    | Filter by phone number or Apple ID                |
+| `--between`   | `-b`      | `A B`       | Chats where BOTH handles appear                   |
+| `--from`      |           | `DATE`      | Start date, inclusive (YYYY-MM-DD)                |
+| `--to`        |           | `DATE`      | End date, inclusive (YYYY-MM-DD)                  |
+| `--context`   | `-x`      | `N`         | Show N messages around each match                 |
+| `--limit`     | `-l`      | `N`         | Max results (default: 50)                         |
+| `--sort`      |           | `asc\|desc` | `asc`=oldest first, `desc`=newest first (default) |
+| `--stats`     | `-s`      |             | Deep analytics for `--contact`                    |
+| `--json`      | `-j`      |             | Machine-readable JSON output                      |
+| `--redact`    | `-r`      |             | Mask phone numbers in output                      |
+| `--db`        |           | `PATH`      | Custom path to chat.db                            |
+| `--no-banner` |           |             | Suppress startup banner                           |
+| `--version`   | `-V`      |             | Print version                                     |
+| `--help`      | `-h`      |             | Show help page                                    |
 
 ---
 
@@ -268,7 +269,7 @@ PRs are welcome! Some ideas:
 ### Development setup
 
 ```bash
-git clone https://github.com/yourusername/imsg-search.git
+git clone https://github.com/dustindog101/imsg-search.git
 cd imsg-search
 pip install rich
 python3 imsg_search.py --help

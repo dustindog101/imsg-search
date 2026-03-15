@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 imsg-search — Search your local iMessage database, safely.
-https://github.com/yourusername/imsg-search
+https://github.com/dustindog101/imsg-search
 """
 
 import argparse
@@ -216,12 +216,13 @@ def print_help():
     tbl3.add_column(style="dim white")
     tbl3.add_column(style="flag.desc")
     out_rows = [
-        ("--json,     -j", "",     "Machine-readable JSON output."),
-        ("--redact,   -r", "",     "Mask phone numbers in output."),
-        ("--no-banner",    "",     "Suppress the startup banner."),
-        ("--db",           "PATH", "Custom path to chat.db."),
-        ("--version,  -V", "",     "Print version and exit."),
-        ("--help,     -h", "",     "Show this help page."),
+        ("--sort",         "asc|desc", "Sort: asc=oldest first, desc=newest first (default)."),
+        ("--json,     -j", "",         "Machine-readable JSON output."),
+        ("--redact,   -r", "",         "Mask phone numbers in output."),
+        ("--no-banner",    "",         "Suppress the startup banner."),
+        ("--db",           "PATH",     "Custom path to chat.db."),
+        ("--version,  -V", "",         "Print version and exit."),
+        ("--help,     -h", "",         "Show this help page."),
     ]
     for f, m, d in out_rows:
         tbl3.add_row(f, m, d)
@@ -301,6 +302,9 @@ def build_search_query(args) -> tuple[str, list]:
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
+    # sort: 'asc' = oldest first, 'desc' = newest first (default)
+    direction = "ASC" if getattr(args, "sort", "desc") == "asc" else "DESC"
+
     sql = f"""
         SELECT DISTINCT
             m.ROWID AS message_id, m.date, m.text, m.is_from_me,
@@ -311,7 +315,7 @@ def build_search_query(args) -> tuple[str, list]:
         LEFT JOIN chat_message_join cmj ON m.ROWID  = cmj.message_id
         LEFT JOIN chat c            ON cmj.chat_id  = c.ROWID
         {where}
-        ORDER BY m.date DESC
+        ORDER BY m.date {direction}
         LIMIT ?
     """
     params.append(args.limit)
@@ -532,8 +536,12 @@ def print_results_human(rows, conn, args, do_redact):
     ctx_n = args.context or 0
     seen_ctx: set = set()  # track msg IDs printed as context to avoid dupes
 
+    # Human display always shows oldest→newest within results
+    sort = getattr(args, "sort", "desc")
+    display_rows = rows if sort == "asc" else list(reversed(rows))
+
     current_chat = None
-    for row in reversed(rows):
+    for row in display_rows:
         cid = row["chat_id"]
         if cid != current_chat:
             current_chat = cid
@@ -562,7 +570,9 @@ def print_results_human(rows, conn, args, do_redact):
     console.print()
 
 
-def print_results_json(rows, do_redact):
+def print_results_json(rows, do_redact, sort="desc"):
+    # rows come from DB in query sort order; emit them as-is — consistent with --sort flag
+    # asc = rows already oldest→newest; desc = rows already newest→oldest
     out = []
     for row in rows:
         sender = row["sender_handle"] or ""
@@ -612,6 +622,8 @@ def build_parser():
     p.add_argument("--context", "-x", type=int, default=0, metavar="N")
     p.add_argument("--limit",   "-l", type=int, default=50, metavar="N")
     p.add_argument("--stats",   "-s", action="store_true")
+    p.add_argument("--sort",    choices=["asc", "desc"], default="desc",
+                   help="Sort order: asc=oldest first, desc=newest first (default)")
     p.add_argument("--json",    "-j", dest="as_json", action="store_true")
     p.add_argument("--redact",  "-r", action="store_true")
     p.add_argument("--db",      metavar="PATH", default=DEFAULT_DB)
@@ -674,7 +686,7 @@ def main():
         err(f"Query failed: {e}")
 
     if args.as_json:
-        print_results_json(rows, args.redact)
+        print_results_json(rows, args.redact, sort=args.sort)
         conn.close()
         return
 
