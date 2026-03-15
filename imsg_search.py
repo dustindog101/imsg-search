@@ -65,7 +65,19 @@ console = Console(theme=THEME, highlight=False)
 
 DEFAULT_DB = os.path.expanduser("~/Library/Messages/chat.db")
 APPLE_EPOCH = 978307200
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+
+# Filter out tapbacks, empty messages, and attachment-only rows
+REAL_MSG_FILTER = "(m.associated_message_type = 0 OR m.associated_message_type IS NULL) AND m.text IS NOT NULL AND m.text != ''"
+
+REACTION_MAP = {
+    2000: ("❤️ ", "Loved"),
+    2001: ("👍", "Liked"),
+    2002: ("👎", "Disliked"),
+    2003: ("😂", "Laughed"),
+    2004: ("❗", "Emphasized"),
+    2005: ("❓", "Questioned"),
+}
 
 STOP_WORDS = {
     "the","and","for","are","but","not","you","all","can","had","her","was",
@@ -341,14 +353,16 @@ def print_help():
     tbl2.add_column(style="dim white")
     tbl2.add_column(style="flag.desc")
     out_rows = [
-        ("--stats,    -s", "",         "Analytics for a contact or group."),
-        ("--sort",         "asc|desc", "Sort: asc=oldest first, desc=newest first."),
-        ("--json,     -j", "",         "Machine-readable JSON output."),
-        ("--redact,   -r", "",         "Mask phone numbers in output."),
-        ("--no-banner",    "",         "Suppress the startup banner."),
-        ("--db",           "PATH",     "Custom path to chat.db."),
-        ("--version,  -V", "",         "Print version and exit."),
-        ("--help,     -h", "",         "Show this help page."),
+        ("--stats,     -s", "",         "Analytics: no args=personal, with --contact or --group=targeted."),
+        ("--deep,      -d", "",         "Deeper analysis for --stats (per-member words, peak hours, etc.)."),
+        ("--reactions",     "",         "Reaction report for a contact or group."),
+        ("--sort",          "asc|desc", "Sort: asc=oldest first, desc=newest first."),
+        ("--json,      -j", "",         "Machine-readable JSON output."),
+        ("--redact,    -r", "",         "Mask phone numbers in output."),
+        ("--no-banner",     "",         "Suppress the startup banner."),
+        ("--db",            "PATH",     "Custom path to chat.db."),
+        ("--version,   -V", "",         "Print version and exit."),
+        ("--help,      -h", "",         "Show this help page."),
     ]
     for f, m, d in out_rows:
         tbl2.add_row(f, m, d)
@@ -436,6 +450,9 @@ def build_search_query(args, group_chat_id=None) -> tuple[str, list]:
         conditions.append("m.date <= ?")
         params.append(dt_to_apple_ns(args.to_date, end_of_day=True))
 
+    # Always exclude reactions and empty messages from search results
+    conditions.append(REAL_MSG_FILTER)
+
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
 
     direction = "ASC" if getattr(args, "sort", "desc") == "asc" else "DESC"
@@ -482,17 +499,225 @@ def fetch_context(conn, chat_id, msg_id, n):
 # Stats — DM
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_stats_dm(conn, handle: str, do_redact: bool):
+def fetch_reactions(conn, handle=None, group_chat_id=None):
+    """Fetch reaction counts split by is_from_me."""
+    if handle:
+        h = normalize_handle(handle)
+        return conn.execute("""
+            SELECT m.associated_message_type AS rtype, m.is_from_me, COUNT(*) as cnt
+            FROM message m
+            LEFT JOIN handle hn ON m.handle_id = hn.ROWID
+            LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+            WHERE (hn.id = ? OR c.chat_identifier = ?)
+            AND m.associated_message_type BETWEEN 2000 AND 2005
+            GROUP BY m.associated_message_type, m.is_from_me
+        """, (h, h)).fetchall()
+    elif group_chat_id:
+        return conn.execute("""
+            SELECT m.associated_message_type AS rtype, m.is_from_me,
+                   h.id AS sender_handle, COUNT(*) as cnt
+            FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            LEFT JOIN handle h ON m.handle_id = h.ROWID
+            WHERE cmj.chat_id = ?
+            AND m.associated_message_type BETWEEN 2000 AND 2005
+            GROUP BY m.associated_message_type, m.is_from_me, h.id
+        """, (group_chat_id,)).fetchall()
+    return []
+
+
+def print_reactions_dm(reaction_rows, do_redact):
+    """Print reaction analytics for a DM contact."""
+    if not reaction_rows:
+        return
+    mine: Counter = Counter()
+    theirs: Counter = Counter()
+    for r in reaction_rows:
+        if r["is_from_me"]:
+            mine[r["rtype"]] += r["cnt"]
+        else:
+            theirs[r["rtype"]] += r["cnt"]
+    total_r = sum(mine.values()) + sum(theirs.values())
+    if total_r == 0:
+        return
+    console.print(Rule("[section]Reactions[/section]"))
+    console.print()
+    max_r = max(list(mine.values()) + list(theirs.values()) + [1])
+    react_tbl = Table(box=box.SIMPLE, padding=(0, 2))
+    react_tbl.add_column("Their reactions to you", style="stat.bar",  min_width=28)
+    react_tbl.add_column("Your reactions to them", style="stat.bar2", min_width=28)
+    for rtype, (emoji, label) in REACTION_MAP.items():
+        t = theirs.get(rtype, 0)
+        m = mine.get(rtype, 0)
+        if t == 0 and m == 0:
+            continue
+        bar_t = f"{emoji} {label:<10} {'█' * int(t/max_r*15)} {t}" if t else ""
+        bar_m = f"{emoji} {label:<10} {'█' * int(m/max_r*15)} {m}" if m else ""
+        react_tbl.add_row(bar_t, bar_m)
+    console.print(Padding(react_tbl, (0, 2)))
+    console.print()
+
+
+def print_reactions_group(reaction_rows, members, do_redact):
+    """Print per-member reactor table for a group."""
+    if not reaction_rows:
+        return
+    # member -> {rtype: count}
+    member_reacts: dict[str, Counter] = defaultdict(Counter)
+    for r in reaction_rows:
+        if r["is_from_me"]:
+            member_reacts["you"][r["rtype"]] += r["cnt"]
+        else:
+            handle = r["sender_handle"] or "unknown"
+            key = redact(handle) if do_redact else handle
+            member_reacts[key][r["rtype"]] += r["cnt"]
+    if not member_reacts:
+        return
+    console.print(Rule("[section]Top Reactors[/section]"))
+    console.print()
+    reactor_tbl = Table(box=None, show_header=False, padding=(0, 1))
+    reactor_tbl.add_column("Member", style="stat.key", min_width=18)
+    reactor_tbl.add_column("Reactions", style="stat.bar")
+    top_reactors = sorted(member_reacts.items(), key=lambda x: sum(x[1].values()), reverse=True)[:10]
+    for member, counts in top_reactors:
+        parts = []
+        for rtype, (emoji, _) in REACTION_MAP.items():
+            c = counts.get(rtype, 0)
+            if c:
+                parts.append(f"{emoji} {c}")
+        reactor_tbl.add_row(member, "  ".join(parts))
+    console.print(Padding(reactor_tbl, (0, 2)))
+    console.print()
+
+
+def run_stats_self(conn, do_redact: bool, deep: bool = False):
+    """Personal dashboard — shown when --stats used with no --contact or --group."""
+    console.print()
+    console.print(Panel(
+        "[group.icon]📱[/group.icon]  [chat.header]Your iMessage Overview[/chat.header]",
+        border_style="magenta", expand=False, padding=(0, 2),
+    ))
+    console.print()
+
+    total = conn.execute(f"SELECT COUNT(*) FROM message m WHERE {REAL_MSG_FILTER}").fetchone()[0]
+    dms   = conn.execute("SELECT COUNT(*) FROM chat WHERE style = 45").fetchone()[0]
+    groups= conn.execute("SELECT COUNT(*) FROM chat WHERE style = 43").fetchone()[0]
+    row   = conn.execute(f"SELECT MIN(m.date), MAX(m.date) FROM message m WHERE {REAL_MSG_FILTER}").fetchone()
+    since = fmt_ts(row[0]) if row[0] else "unknown"
+
+    ov = Table(box=box.SIMPLE, show_header=False, padding=(0, 3))
+    ov.add_column(style="stat.key"); ov.add_column(style="stat.val")
+    ov.add_column(style="stat.key"); ov.add_column(style="stat.val")
+    ov.add_row("Total messages", f"{total:,}",  "DM conversations",  f"{dms:,}")
+    ov.add_row("Group chats",    f"{groups:,}", "Messaging since",   since)
+    console.print(Padding(ov, (0, 2)))
+
+    # Top contacts
+    top_contacts = conn.execute(f"""
+        SELECT h.id, COUNT(*) as cnt FROM message m
+        LEFT JOIN handle h ON m.handle_id = h.ROWID
+        WHERE {REAL_MSG_FILTER} AND h.id IS NOT NULL AND m.is_from_me = 0
+        GROUP BY h.id ORDER BY cnt DESC LIMIT 6
+    """).fetchall()
+    if top_contacts:
+        console.print(Rule("[section]Top Contacts[/section]"))
+        console.print()
+        max_c = top_contacts[0]["cnt"]
+        ct = Table(box=None, show_header=False, padding=(0, 1))
+        ct.add_column(style="stat.key", min_width=18)
+        ct.add_column(style="stat.bar", min_width=30)
+        ct.add_column(style="stat.val", justify="right", width=8)
+        for idx, r in enumerate(top_contacts):
+            style = MEMBER_STYLES[idx % len(MEMBER_STYLES)]
+            bar = "█" * int(r["cnt"] / max_c * 25)
+            handle = redact(r["id"]) if do_redact else r["id"]
+            ct.add_row(handle, f"[{style}]{bar}[/{style}]", f"{r['cnt']:,}")
+        console.print(Padding(ct, (0, 2)))
+        console.print()
+
+    # Top groups
+    top_groups = conn.execute(f"""
+        SELECT c.display_name, c.chat_identifier,
+               COUNT(DISTINCT chj.handle_id) as members,
+               COUNT(DISTINCT cmj.message_id) as cnt
+        FROM chat c
+        JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+        JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+        JOIN message m ON cmj.message_id = m.ROWID
+        WHERE c.style = 43 AND {REAL_MSG_FILTER}
+        GROUP BY c.ROWID ORDER BY cnt DESC LIMIT 5
+    """).fetchall()
+    if top_groups:
+        console.print(Rule("[section]Top Groups[/section]"))
+        console.print()
+        max_g = top_groups[0]["cnt"]
+        gt = Table(box=None, show_header=False, padding=(0, 1))
+        gt.add_column(style="stat.key", min_width=22)
+        gt.add_column(style="stat.bar2", min_width=30)
+        gt.add_column(style="stat.val", justify="right", width=8)
+        for r in top_groups:
+            name = r["display_name"] or r["chat_identifier"][:16] + "..."
+            bar = "█" * int(r["cnt"] / max_g * 25)
+            gt.add_row(f"{name}  [dim]({r['members']}👥)[/dim]", f"[stat.bar2]{bar}[/stat.bar2]", f"{r['cnt']:,}")
+        console.print(Padding(gt, (0, 2)))
+        console.print()
+
+    # Yearly sparkline
+    year_rows = conn.execute(f"""
+        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as mo, COUNT(*) as cnt
+        FROM message m WHERE {REAL_MSG_FILTER} GROUP BY mo ORDER BY mo
+    """).fetchall()
+    if year_rows:
+        months = [r["mo"] for r in year_rows]
+        vals   = [r["cnt"] for r in year_rows]
+        console.print(Rule("[section]Monthly Volume[/section]"))
+        console.print()
+        s = sparkline(vals)
+        console.print(f"  [stat.bar]{s}[/stat.bar]")
+        console.print(f"  [dim]{months[0]}{'':{max(0,len(s)-14)}}{months[-1]}[/dim]")
+        console.print()
+
+    if deep:
+        # Global top words
+        all_rows = conn.execute(f"SELECT text FROM message m WHERE {REAL_MSG_FILTER} AND m.is_from_me = 1").fetchall()
+        tw = top_words(all_rows, n=12)
+        if tw:
+            console.print(Rule("[section]Your Most-Used Words[/section]"))
+            console.print()
+            wl = "  ".join(f"[stat.bar]{w}[/stat.bar] [dim]({c})[/dim]" for w, c in tw)
+            console.print(f"  {wl}")
+            console.print()
+
+        # Busiest hour
+        hour_rows = conn.execute(f"""
+            SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as hr, COUNT(*) as cnt
+            FROM message m WHERE {REAL_MSG_FILTER} GROUP BY hr
+        """).fetchall()
+        hour_dict = {int(r["hr"]): r["cnt"] for r in hour_rows}
+        hvals = [hour_dict.get(h, 0) for h in range(24)]
+        peak  = max(range(24), key=lambda h: hour_dict.get(h, 0))
+        console.print(Rule("[section]Your Busiest Hour[/section]"))
+        console.print()
+        console.print(f"  [stat.key]Peak hour[/stat.key]  [stat.val]{peak:02d}:00–{peak:02d}:59[/stat.val]  ({hour_dict.get(peak,0):,} messages)")
+        console.print(f"  [stat.bar]{sparkline(hvals)}[/stat.bar]")
+        console.print(f"  [dim]00                   12                   23[/dim]")
+        console.print()
+
+    console.print(f"  [tip]imsg-search --help for all options[/tip]")
+    console.print()
+
+
+def run_stats_dm(conn, handle: str, do_redact: bool, deep: bool = False):
     h = normalize_handle(handle)
     label = redact(h) if do_redact else h
 
-    rows = conn.execute("""
-        SELECT m.date, m.text, m.is_from_me
-        FROM message m
+    rows = conn.execute(f"""
+        SELECT m.date, m.text, m.is_from_me FROM message m
         LEFT JOIN handle hn ON m.handle_id = hn.ROWID
         LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         LEFT JOIN chat c ON cmj.chat_id = c.ROWID
-        WHERE hn.id = ? OR c.chat_identifier = ?
+        WHERE (hn.id = ? OR c.chat_identifier = ?) AND {REAL_MSG_FILTER}
         ORDER BY m.date ASC
     """, (h, h)).fetchall()
 
@@ -577,19 +802,23 @@ def run_stats_dm(conn, handle: str, do_redact: bool):
     console.print(Padding(word_tbl, (0, 2)))
     console.print()
 
+    # Reactions
+    reaction_rows = fetch_reactions(conn, handle=handle)
+    print_reactions_dm(reaction_rows, do_redact)
+
 # ────────────────────────────────────────────────────────────────────────────
 # Stats — Group
 # ────────────────────────────────────────────────────────────────────────────
 
-def run_stats_group(conn, chat_id: int, group_name: str, do_redact: bool):
+def run_stats_group(conn, chat_id: int, group_name: str, do_redact: bool, deep: bool = False):
     members = get_group_members(conn, chat_id)
 
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT m.date, m.text, m.is_from_me, h.id AS sender_handle
         FROM message m
         JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
         LEFT JOIN handle h ON m.handle_id = h.ROWID
-        WHERE cmj.chat_id = ?
+        WHERE cmj.chat_id = ? AND {REAL_MSG_FILTER}
         ORDER BY m.date ASC
     """, (chat_id,)).fetchall()
 
@@ -694,6 +923,43 @@ def run_stats_group(conn, chat_id: int, group_name: str, do_redact: bool):
         word_line = "  ".join(f"[stat.bar]{w}[/stat.bar] [dim]({c})[/dim]" for w, c in tw)
         console.print(f"  {word_line}")
     console.print()
+
+    # Reactions (always show in group stats)
+    reaction_rows = fetch_reactions(conn, group_chat_id=chat_id)
+    print_reactions_group(reaction_rows, members, do_redact)
+
+    if deep:
+        # Per-member top words
+        console.print(Rule("[section]Per-Member Top Words[/section]"))
+        console.print()
+        member_msgs: dict[str, list] = defaultdict(list)
+        for r in rows:
+            key = "you" if r["is_from_me"] else (redact(r["sender_handle"] or "?") if do_redact else (r["sender_handle"] or "unknown"))
+            member_msgs[key].append(r)
+        wt = Table(box=box.SIMPLE, padding=(0, 1))
+        members_shown = list(member_msgs.keys())[:4]
+        for m in members_shown:
+            wt.add_column(m, style="stat.bar", min_width=18)
+        max_rows_w = max(len(top_words(member_msgs[m], n=6)) for m in members_shown) if members_shown else 0
+        per_tw = {m: top_words(member_msgs[m], n=6) for m in members_shown}
+        for i in range(max_rows_w):
+            wt.add_row(*[f"{per_tw[m][i][0]} ({per_tw[m][i][1]})" if i < len(per_tw[m]) else "" for m in members_shown])
+        console.print(Padding(wt, (0, 2)))
+        console.print()
+
+        # Per-member peak hour
+        console.print(Rule("[section]Per-Member Peak Hour[/section]"))
+        console.print()
+        ph_tbl = Table(box=None, show_header=False, padding=(0, 2))
+        ph_tbl.add_column(style="stat.key", min_width=18)
+        ph_tbl.add_column(style="stat.val")
+        for member, msgs in list(member_msgs.items())[:8]:
+            h_ctr = Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).hour for r in msgs)
+            if h_ctr:
+                ph = max(h_ctr, key=h_ctr.get)
+                ph_tbl.add_row(member, f"{ph:02d}:00–{ph:02d}:59  ({h_ctr[ph]} msgs)")
+        console.print(Padding(ph_tbl, (0, 2)))
+        console.print()
 
 # ────────────────────────────────────────────────────────────────────────────
 # Display
@@ -840,14 +1106,16 @@ def build_parser():
     p.add_argument("--group",   "-g", metavar="NAME")
     p.add_argument("--member",  "-m", metavar="HANDLE")
     # Stats & output
-    p.add_argument("--stats",   "-s", action="store_true")
-    p.add_argument("--sort",    choices=["asc", "desc"], default="desc")
-    p.add_argument("--json",    "-j", dest="as_json", action="store_true")
-    p.add_argument("--redact",  "-r", action="store_true")
-    p.add_argument("--db",      metavar="PATH", default=DEFAULT_DB)
+    p.add_argument("--stats",     "-s", action="store_true")
+    p.add_argument("--deep",      "-d", action="store_true", help="Deeper analysis (slower)")
+    p.add_argument("--reactions",       action="store_true", help="Show reaction analytics only")
+    p.add_argument("--sort",      choices=["asc", "desc"], default="desc")
+    p.add_argument("--json",      "-j", dest="as_json", action="store_true")
+    p.add_argument("--redact",    "-r", action="store_true")
+    p.add_argument("--db",        metavar="PATH", default=DEFAULT_DB)
     p.add_argument("--no-banner", dest="no_banner", action="store_true")
-    p.add_argument("--version", "-V", action="store_true")
-    p.add_argument("--help",    "-h", action="store_true")
+    p.add_argument("--version",   "-V", action="store_true")
+    p.add_argument("--help",      "-h", action="store_true")
     return p
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -885,17 +1153,28 @@ def main():
     if args.group:
         group_chat_id, group_name = resolve_group(conn, args.group)
 
+    # ── Reactions standalone mode ──
+    if args.reactions:
+        if group_chat_id:
+            rr = fetch_reactions(conn, group_chat_id=group_chat_id)
+            print_reactions_group(rr, get_group_members(conn, group_chat_id), args.redact)
+        elif args.contact:
+            rr = fetch_reactions(conn, handle=args.contact)
+            print_reactions_dm(rr, args.redact)
+        else:
+            err("--reactions requires --contact HANDLE or --group NAME")
+        conn.close()
+        return
+
     # ── Stats mode ──
     if args.stats:
-        if args.group or group_chat_id:
-            if not group_chat_id:
-                err("--stats with --group requires a valid group name")
-            run_stats_group(conn, group_chat_id, group_name, args.redact)
+        if group_chat_id:
+            run_stats_group(conn, group_chat_id, group_name, args.redact, deep=args.deep)
         elif args.contact:
-            run_stats_dm(conn, args.contact, args.redact)
+            run_stats_dm(conn, args.contact, args.redact, deep=args.deep)
         else:
-            err("--stats requires --contact HANDLE or --group NAME",
-                "e.g. imsg-search --contact +12025551234 --stats\n     imsg-search --group \"Warriors\" --stats")
+            # No contact or group → personal dashboard
+            run_stats_self(conn, args.redact, deep=args.deep)
         conn.close()
         return
 
