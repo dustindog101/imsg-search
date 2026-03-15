@@ -50,11 +50,14 @@ $ imsg-search --text "fleet street" --context 2
 - 🔗 **Between filter** — find chats where two specific contacts both appear
 - 📅 **Date ranges** — `--from` / `--to` with YYYY-MM-DD syntax
 - 💬 **Context mode** — show N messages before and after each match (like `grep -C`)
-- 📊 **Stats mode** — deep analytics for contacts *and* group chats with per-member breakdowns
+- 📱 **Personal stats** — your own iMessage overview: top contacts, top groups, monthly sparkline
+- 📊 **Contact & group stats** — deep analytics with activity heatmaps, top words, per-member breakdowns
+- ❤️  **Reaction analytics** — who reacts to what, per-contact and per-member reactor tables
+- 🔎 **Deep mode** — `--deep` for per-member word counts, peak hours, and more thorough analysis
 - 🔒 **Redact mode** — mask all phone numbers for safe screenshots and logs
-- 📡 **JSON output** — machine-readable output, perfect for piping into dashboards or scripts
+- 📡 **JSON output** — machine-readable output for pipelines and dashboards
 - 🛡️ **Read-only & safe** — opens `chat.db` in read-only mode, parameterized SQL, zero write risk
-- 🎨 **Beautiful output** — colored chat panels, highlighted matches, sparkline charts
+- 🎨 **Beautiful output** — colored panels, highlighted matches, sparklines, emoji reaction charts
 
 ---
 
@@ -93,30 +96,32 @@ All filters are optional and fully composable.
 
 ### Options
 
-| Flag               | Shorthand | Argument    | Description                                       |
-| ------------------ | --------- | ----------- | ------------------------------------------------- |
-| `--text`           | `-t`      | `QUERY`     | Search message text (case-insensitive)            |
-| `--contact`        | `-c`      | `HANDLE`    | Filter by phone number or Apple ID (DMs)          |
-| `--between`        | `-b`      | `A B`       | Chats where BOTH handles appear                   |
-| `--from`           |           | `DATE`      | Start date, inclusive (YYYY-MM-DD)                |
-| `--to`             |           | `DATE`      | End date, inclusive (YYYY-MM-DD)                  |
-| `--context`        | `-x`      | `N`         | Show N messages around each match                 |
-| `--limit`          | `-l`      | `N`         | Max results (default: 50)                         |
-| `--sort`           |           | `asc\|desc` | `asc`=oldest first, `desc`=newest first (default) |
-|                    |           |             |                                                   |
-| **Group Chat**     |           |             |                                                   |
-| `--list-groups`    |           |             | List all group chats (ranked by activity)         |
-| `--group`          | `-g`      | `NAME`      | Search within a group chat (name or chat ID)      |
-| `--member`         | `-m`      | `HANDLE`    | Filter to a participant within a group            |
-|                    |           |             |                                                   |
-| **Stats & Output** |           |             |                                                   |
-| `--stats`          | `-s`      |             | Analytics for a contact or group                  |
-| `--json`           | `-j`      |             | Machine-readable JSON output                      |
-| `--redact`         | `-r`      |             | Mask phone numbers in output                      |
-| `--db`             |           | `PATH`      | Custom path to chat.db                            |
-| `--no-banner`      |           |             | Suppress startup banner                           |
-| `--version`        | `-V`      |             | Print version                                     |
-| `--help`           | `-h`      |             | Show help page                                    |
+| Flag               | Shorthand | Argument    | Description                                                                    |
+| ------------------ | --------- | ----------- | ------------------------------------------------------------------------------ |
+| `--text`           | `-t`      | `QUERY`     | Search message text (case-insensitive)                                         |
+| `--contact`        | `-c`      | `HANDLE`    | Filter by phone number or Apple ID (DMs)                                       |
+| `--between`        | `-b`      | `A B`       | Chats where BOTH handles appear                                                |
+| `--from`           |           | `DATE`      | Start date, inclusive (YYYY-MM-DD)                                             |
+| `--to`             |           | `DATE`      | End date, inclusive (YYYY-MM-DD)                                               |
+| `--context`        | `-x`      | `N`         | Show N messages around each match                                              |
+| `--limit`          | `-l`      | `N`         | Max results (default: 50)                                                      |
+| `--sort`           |           | `asc\|desc` | `asc`=oldest first, `desc`=newest first (default)                              |
+|                    |           |             |                                                                                |
+| **Group Chat**     |           |             |                                                                                |
+| `--list-groups`    |           |             | List all group chats (ranked by activity)                                      |
+| `--group`          | `-g`      | `NAME`      | Search within a group chat (name or chat ID)                                   |
+| `--member`         | `-m`      | `HANDLE`    | Filter to a participant within a group                                         |
+|                    |           |             |                                                                                |
+| **Stats & Output** |           |             |                                                                                |
+| `--stats`          | `-s`      |             | Analytics: alone=personal overview, with `--contact`/`--group`=targeted        |
+| `--deep`           | `-d`      |             | Deeper analysis for `--stats` (per-member words, peak hours, global top words) |
+| `--reactions`      |           |             | Standalone reaction report for a contact or group                              |
+| `--json`           | `-j`      |             | Machine-readable JSON output                                                   |
+| `--redact`         | `-r`      |             | Mask phone numbers in output                                                   |
+| `--db`             |           | `PATH`      | Custom path to chat.db                                                         |
+| `--no-banner`      |           |             | Suppress startup banner                                                        |
+| `--version`        | `-V`      |             | Print version                                                                  |
+| `--help`           | `-h`      |             | Show help page                                                                 |
 
 ---
 
@@ -154,6 +159,37 @@ imsg-search --text "hey" --context 3
 imsg-search --between +12025551234 +19175550000
 ```
 
+### Your personal stats dashboard
+
+No contact or group needed — just `--stats` alone:
+
+```bash
+imsg-search --stats            # fast: totals, top contacts, top groups, sparkline
+imsg-search --stats --deep     # adds your most-used words and busiest hour globally
+```
+
+```
+╭──────────────────────────────╮
+│  📱  Your iMessage Overview  │
+╰──────────────────────────────╯
+
+  Total messages   142,301    DM conversations  2,395
+  Group chats          392    Messaging since   2019-09-04
+
+── Top Contacts ──────────────────────────────────────────
+  +13019104042   █████████████████████████ 42,320
+  +12026434356   ████████                   8,241
+  +12404863844   ████                       3,101
+
+── Top Groups ────────────────────────────────────────────
+  Chud Warriors 2026 (13👥)  ████████████████  24,001
+  Family (5👥)               ███                1,848
+
+── Monthly Volume ────────────────────────────────────────
+  ▁▂▃▄▅▆▇█▇▆▅▄▃▄▅▆▇█
+  2019-09                                      2026-03
+```
+
 ### Deep contact analytics
 
 ```bash
@@ -169,24 +205,36 @@ imsg-search --contact +12025551234 --stats
   You sent          612 (51%)  Last message   2024-11-14 23:07
   They sent         592 (49%)  Relationship   777 days
 
-── Activity by Day ──────────────────────────────────────
-  Day   You                    Them
-  Mon   ████████████████ 98    █████████████ 78
-  Tue   █████████████ 82       ████████████████ 94
-  ...
-
-── Hourly Activity ──────────────────────────────────────
-  Peak hour  22:00–22:59  (187 messages)
-  ▁▁▁▁▁▁▁▂▃▃▄▄▅▆▇█▇▆▅▄▃▂▂▁
-  00                   12                   23
-
 ── Top Words ────────────────────────────────────────────
   Your top words          Their top words
-  ─────────────────────────────────────────
   bro (312)               lmao (201)
   real (198)              facts (187)
   bet (155)               word (143)
+
+── Reactions ────────────────────────────────────────────
+  Their reactions to you      Your reactions to them
+  ❤️  Loved    ███████  201   ❤️  Loved   ████  108
+  😂  Laughed   ██      44   👍  Liked         18
 ```
+
+### Reaction analytics
+
+Standalone reaction report for any contact or group:
+
+```bash
+imsg-search --contact +12025551234 --reactions
+imsg-search --group "Warriors" --reactions
+```
+
+Group reactor table shows who reacts most and with what emoji across all members.
+
+### Deep group analytics
+
+```bash
+imsg-search --group "Warriors" --stats --deep
+```
+
+`--deep` adds per-member top words side-by-side and per-member peak hour — who's the night owl, who goes quiet on weekends.
 
 ### JSON output (for piping into dashboards)
 
@@ -344,10 +392,12 @@ The only permission required is **Full Disk Access** for Terminal, which macOS r
 PRs are welcome! Some ideas:
 
 - [x] ~~Group chat support~~ ✅ shipped in v1.1.0
+- [x] ~~Reaction analytics~~ ✅ shipped in v1.2.0
+- [x] ~~Personal stats dashboard~~ ✅ shipped in v1.2.0
+- [x] ~~Deep mode (`--deep`)~~ ✅ shipped in v1.2.0
 - [ ] Attachment search (images, files)
 - [ ] Export to Markdown / HTML
 - [ ] `--watch` mode for live incoming messages
-- [ ] Integration with `imsg` CLI for sending replies
 - [ ] Contact name resolution (map numbers to names from Contacts.app)
 
 ### Development setup
