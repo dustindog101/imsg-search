@@ -24,21 +24,9 @@
 No cloud. No API keys. No sending your messages anywhere.  
 Just you, your terminal, and 10+ years of chat history at your fingertips.
 
-```ansi
-$ imsg-search --text "fleet street" --context 2
-
-╭─────────────────╮
-│  +12025550156   │
-╰─────────────────╯
-  [2025-07-18 04:34]   you  →  I'm by [31;1mFleet Street[0m rn
-  [2025-07-18 04:42]   you  →  By [31;1mFleet Street[0m in my car
-  [2025-07-18 04:54]   +12025550156  ·  He's on [31;1mfleet street[0m by the school
-  ╌╌╌
-
-╭─────────────────────────────────────────────╮
-│  6 results  ·  text='fleet street'          │
-╰─────────────────────────────────────────────╯
-```
+<p align="center">
+  <img src="demo.png" alt="imsg-search demo" width="720" />
+</p>
 
 ---
 
