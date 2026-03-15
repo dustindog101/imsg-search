@@ -669,10 +669,14 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
         GROUP BY c.ROWID ORDER BY cnt DESC LIMIT 5
     """).fetchall()
 
-    year_rows = conn.execute(f"""
-        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as mo, COUNT(*) as cnt
-        FROM message m WHERE {REAL_MSG_FILTER} GROUP BY mo ORDER BY mo
-    """).fetchall()
+    all_message_dates = conn.execute(f"SELECT date FROM message m WHERE {REAL_MSG_FILTER}").fetchall()
+    
+    month_counts = Counter()
+    for r in all_message_dates:
+        dt = datetime.fromtimestamp(apple_to_unix(r["date"]))
+        month_counts[dt.strftime("%Y-%m")] += 1
+        
+    year_rows = [{"mo": k, "cnt": v} for k, v in sorted(month_counts.items())]
 
     if as_json:
         out: dict = {
@@ -699,22 +703,18 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
         if deep:
             all_rows = conn.execute(f"SELECT text FROM message m WHERE {REAL_MSG_FILTER} AND m.is_from_me = 1").fetchall()
             out["your_top_words"] = [{"word": w, "count": c} for w, c in top_words(all_rows, n=12)]
-            hour_rows = conn.execute(f"""
-                SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as hr, COUNT(*) as cnt
-                FROM message m WHERE {REAL_MSG_FILTER} GROUP BY hr
-            """).fetchall()
-            out["hourly_activity"] = [{"hour": int(r["hr"]), "messages": r["cnt"]} for r in hour_rows]
+            out["hourly_activity"] = [{"hour": h, "messages": v} for h, v in sorted(Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).hour for r in all_message_dates).items())]
         print(json.dumps(out, indent=2))
         return
-    if top_contacts:
+    if top_contacts_rows:
         console.print(Rule("[section]Top Contacts[/section]"))
         console.print()
-        max_c = top_contacts[0]["cnt"]
+        max_c = top_contacts_rows[0]["cnt"]
         ct = Table(box=None, show_header=False, padding=(0, 1))
         ct.add_column(style="stat.key", min_width=18)
         ct.add_column(style="stat.bar", min_width=30)
         ct.add_column(style="stat.val", justify="right", width=8)
-        for idx, r in enumerate(top_contacts):
+        for idx, r in enumerate(top_contacts_rows):
             style = MEMBER_STYLES[idx % len(MEMBER_STYLES)]
             bar = "█" * int(r["cnt"] / max_c * 25)
             handle = redact(r["id"]) if do_redact else r["id"]
@@ -750,10 +750,6 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
         console.print()
 
     # Yearly sparkline
-    year_rows = conn.execute(f"""
-        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as mo, COUNT(*) as cnt
-        FROM message m WHERE {REAL_MSG_FILTER} GROUP BY mo ORDER BY mo
-    """).fetchall()
     if year_rows:
         months = [r["mo"] for r in year_rows]
         vals   = [r["cnt"] for r in year_rows]
@@ -776,12 +772,9 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
             console.print()
 
         # Busiest hour
-        hour_rows = conn.execute(f"""
-            SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as hr, COUNT(*) as cnt
-            FROM message m WHERE {REAL_MSG_FILTER} GROUP BY hr
-        """).fetchall()
-        hour_dict = {int(r["hr"]): r["cnt"] for r in hour_rows}
-        hvals = [hour_dict.get(h, 0) for h in range(24)]
+        hour_all = Counter(datetime.fromtimestamp(apple_to_unix(r["date"])).hour for r in all_message_dates)
+        hour_dict = {h: hour_all.get(h, 0) for h in range(24)}
+        hvals = [hour_dict[h] for h in range(24)]
         peak  = max(range(24), key=lambda h: hour_dict.get(h, 0))
         console.print(Rule("[section]Your Busiest Hour[/section]"))
         console.print()
