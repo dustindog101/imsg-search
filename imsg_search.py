@@ -670,7 +670,7 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
     """).fetchall()
 
     year_rows = conn.execute(f"""
-        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as mo, COUNT(*) as cnt
+        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as mo, COUNT(*) as cnt
         FROM message m WHERE {REAL_MSG_FILTER} GROUP BY mo ORDER BY mo
     """).fetchall()
 
@@ -700,7 +700,7 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
             all_rows = conn.execute(f"SELECT text FROM message m WHERE {REAL_MSG_FILTER} AND m.is_from_me = 1").fetchall()
             out["your_top_words"] = [{"word": w, "count": c} for w, c in top_words(all_rows, n=12)]
             hour_rows = conn.execute(f"""
-                SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as hr, COUNT(*) as cnt
+                SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as hr, COUNT(*) as cnt
                 FROM message m WHERE {REAL_MSG_FILTER} GROUP BY hr
             """).fetchall()
             out["hourly_activity"] = [{"hour": int(r["hr"]), "messages": r["cnt"]} for r in hour_rows]
@@ -751,7 +751,7 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
 
     # Yearly sparkline
     year_rows = conn.execute(f"""
-        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as mo, COUNT(*) as cnt
+        SELECT strftime('%Y-%m', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as mo, COUNT(*) as cnt
         FROM message m WHERE {REAL_MSG_FILTER} GROUP BY mo ORDER BY mo
     """).fetchall()
     if year_rows:
@@ -777,7 +777,7 @@ def run_stats_self(conn, do_redact: bool, deep: bool = False, as_json: bool = Fa
 
         # Busiest hour
         hour_rows = conn.execute(f"""
-            SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch')) as hr, COUNT(*) as cnt
+            SELECT strftime('%H', datetime(m.date/1000000000 + {APPLE_EPOCH}, 'unixepoch', 'localtime')) as hr, COUNT(*) as cnt
             FROM message m WHERE {REAL_MSG_FILTER} GROUP BY hr
         """).fetchall()
         hour_dict = {int(r["hr"]): r["cnt"] for r in hour_rows}
